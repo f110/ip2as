@@ -59,8 +59,8 @@ const (
 type MRT struct {
 	Timestamp   uint32
 	Microsecond uint32 // Extend Timestamp format only
-	Type        []byte
-	SubType     []byte
+	Type        uint16
+	SubType     uint16
 	Message     []byte
 }
 
@@ -72,7 +72,7 @@ type OSPFv2 struct {
 }
 
 type TableDump struct {
-	MRT
+	*MRT
 	ViewNumber     uint16
 	SeqNumber      uint16
 	Prefix         net.IP
@@ -86,9 +86,8 @@ type TableDump struct {
 }
 
 type TableDumpv2PeerIndexTable struct {
-	MRT
+	*MRT
 	CollectorBGPId uint32
-	ViewNameLength uint16
 	ViewName       []byte
 	PeerCount      uint16
 	PeerEntries    []TableDumpv2PeerEntry
@@ -98,7 +97,7 @@ type TableDumpv2PeerEntry struct {
 	PeerType      uint8
 	PeerBGPId     uint32
 	PeerIpAddress net.IP
-	PeerASs       []uint16
+	PeerAS        uint32
 }
 
 type TableDumpv2RIB struct {
@@ -184,7 +183,7 @@ type OSPFv3 struct {
 type Reader struct {
 	r   *bufio.Reader
 	err error
-	msg *MRT
+	msg interface{}
 }
 
 func NewReader(r io.Reader) *Reader {
@@ -205,9 +204,9 @@ func (r *Reader) Scan() bool {
 		return false
 	}
 	timestamp := binary.BigEndian.Uint32(buf[:4])
-	typ := buf[5:6]
-	subTyp := buf[7:8]
-	length := binary.BigEndian.Uint32(buf[9:12])
+	typ := binary.BigEndian.Uint16(buf[4:6])
+	subTyp := binary.BigEndian.Uint16(buf[6:8])
+	length := binary.BigEndian.Uint32(buf[8:12])
 	buf = make([]byte, length)
 	n, err = r.r.Read(buf)
 	if err != nil {
@@ -218,17 +217,20 @@ func (r *Reader) Scan() bool {
 		return false
 	}
 	message := buf[:length]
-	r.msg = &MRT{
+	msg := &MRT{
 		Timestamp: timestamp,
 		Type:      typ,
 		SubType:   subTyp,
-		Message:   message,
+	}
+	switch typ {
+	case TypeTableDumpv2:
+		r.parseTableDumpv2(msg, message)
 	}
 
 	return true
 }
 
-func (r *Reader) Message() *MRT {
+func (r *Reader) Message() interface{} {
 	if r.err != nil {
 		return nil
 	}
@@ -238,4 +240,56 @@ func (r *Reader) Message() *MRT {
 
 func (r *Reader) Err() error {
 	return r.err
+}
+
+func (r *Reader) parseTableDumpv2(header *MRT, message []byte) {
+	switch header.SubType {
+	case TableDumpv2SubTypePeerIndexTable:
+		collectorBGPId := binary.BigEndian.Uint32(message[:4])
+		viewNameLength := binary.BigEndian.Uint16(message[4:6])
+		var viewName []byte
+		if viewNameLength > 0 {
+			viewName = message[6 : 6+viewNameLength]
+		}
+		message = message[6+viewNameLength:]
+		peerCount := binary.BigEndian.Uint16(message[:2])
+		msg := &TableDumpv2PeerIndexTable{
+			CollectorBGPId: collectorBGPId,
+			ViewName:       viewName,
+			PeerCount:      peerCount,
+		}
+		msg.PeerEntries = r.parsePeerEntry(message[2:], int(peerCount))
+		msg.MRT = header
+		r.msg = msg
+	}
+}
+
+func (r *Reader) parsePeerEntry(message []byte, expectedCount int) []TableDumpv2PeerEntry {
+	entries := make([]TableDumpv2PeerEntry, 0, expectedCount)
+	for {
+		if len(message) == 0 {
+			break
+		}
+		entry := TableDumpv2PeerEntry{
+			PeerType:  message[0],
+			PeerBGPId: binary.BigEndian.Uint32(message[1:5]),
+		}
+		if entry.PeerType&1 == 1 { // IPv6
+			entry.PeerIpAddress = net.IP(message[5:21])
+			message = message[21:]
+		} else { // IPv4
+			entry.PeerIpAddress = net.IP(message[5:9])
+			message = message[9:]
+		}
+		if entry.PeerType>>1&1 == 1 { // 32bit AS Number
+			entry.PeerAS = binary.BigEndian.Uint32(message[:4])
+			message = message[4:]
+		} else { // 16bit AS Number
+			entry.PeerAS = uint32(binary.BigEndian.Uint16(message[:2]))
+			message = message[2:]
+		}
+
+		entries = append(entries, entry)
+	}
+	return entries
 }
