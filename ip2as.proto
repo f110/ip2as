@@ -1,0 +1,15 @@
+syntax = "proto3";
+package dev.f110.ip2as;
+option go_package = "github.com/f110/ip2as";
+
+service Ip2As {
+    rpc ToAs(ToAsRequest) returns (ToAsResponse) {};
+}
+
+message ToAsRequest {
+    string ip_address = 1;
+}
+
+message ToAsResponse {
+    int32 as = 1;
+}
