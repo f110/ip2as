@@ -100,12 +100,13 @@ type TableDumpv2PeerEntry struct {
 	PeerAS        uint32
 }
 
+// RIB Entry Header
 type TableDumpv2RIB struct {
-	MRT
+	*MRT
 	SeqNumber    uint32
 	PrefixLength uint8
 	Prefix       net.IP
-	EntryCount   uint8
+	EntryCount   uint16
 	RIBEntries   []RIBEntry
 }
 
@@ -122,7 +123,7 @@ type TableDumpv2RIBGeneric struct {
 type RIBEntry struct {
 	PeerIndex      uint16
 	OriginatedTime uint32
-	AttrLength     uint8
+	AttrLength     uint16
 	Attr           []byte
 }
 
@@ -261,6 +262,25 @@ func (r *Reader) parseTableDumpv2(header *MRT, message []byte) {
 		msg.PeerEntries = r.parsePeerEntry(message[2:], int(peerCount))
 		msg.MRT = header
 		r.msg = msg
+	case TableDumpv2SubTypeRIBIPv4Unicast:
+		seqNumber := binary.BigEndian.Uint32(message[:4])
+		prefixLength := uint8(message[4])
+		var prefix net.IP
+		if prefixLength > 0 {
+			prefix = net.IP(message[5 : 5+prefixLength])
+		}
+		message = message[5+prefixLength:]
+		entryCount := binary.BigEndian.Uint16(message[:2])
+		message = message[2:]
+		msg := &TableDumpv2RIB{
+			SeqNumber:    seqNumber,
+			PrefixLength: prefixLength,
+			Prefix:       prefix,
+			EntryCount:   entryCount,
+			RIBEntries:   r.parseRIBEntry(message, int(entryCount)),
+		}
+		msg.MRT = header
+		r.msg = msg
 	}
 }
 
@@ -291,5 +311,29 @@ func (r *Reader) parsePeerEntry(message []byte, expectedCount int) []TableDumpv2
 
 		entries = append(entries, entry)
 	}
+
+	return entries
+}
+
+func (r *Reader) parseRIBEntry(message []byte, expectedCount int) []RIBEntry {
+	entries := make([]RIBEntry, 0, expectedCount)
+	for {
+		if len(message) == 0 {
+			break
+		}
+		peerIndex := binary.BigEndian.Uint16(message[:2])
+		originatedTime := binary.BigEndian.Uint32(message[2:6])
+		attrLength := binary.BigEndian.Uint16(message[6:8])
+		entry := RIBEntry{
+			PeerIndex:      peerIndex,
+			OriginatedTime: originatedTime,
+			AttrLength:     attrLength,
+			Attr:           message[8 : 8+attrLength],
+		}
+		message = message[8+attrLength:]
+
+		entries = append(entries, entry)
+	}
+
 	return entries
 }
